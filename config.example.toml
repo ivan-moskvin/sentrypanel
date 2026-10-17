@@ -1,0 +1,122 @@
+refresh_secs = 60
+
+[sentry]
+base_url = "https://de.sentry.io"
+org = "my-org"
+# The token is read from SENTRY_AUTH_TOKEN; without it, from this file, which
+# must be readable by its owner only (chmod 600).
+token_file = "~/.config/sentrypanel/token"
+
+[device]
+# Leave both out when there is a single Times Gate on the network.
+# ip = "192.168.1.50"
+# name = "Times Gate"
+screen = 1
+
+[[section]]
+title = "SERVERS"
+
+[[section.metric]]
+label = "WEB"
+dataset = "logs"
+query = "host:web-1"
+field = "avg(tags[ping_ms,number])"
+period = "5m"
+unit = "ms"
+warn = 80
+crit = 200
+missing = "crit"
+
+[[section.metric]]
+label = "DB"
+dataset = "logs"
+query = "host:db-1"
+field = "avg(tags[ping_ms,number])"
+period = "5m"
+unit = "ms"
+warn = 80
+crit = 200
+missing = "crit"
+
+[[section.metric]]
+label = "DISK"
+dataset = "logs"
+query = "host:web-1"
+field = "max(tags[disk_free_pct,number])"
+period = "15m"
+unit = "%"
+warn = 20
+crit = 10
+worse = "lower"
+
+[[section]]
+title = "LINKS"
+
+[[section.metric]]
+label = "MAIN"
+dataset = "logs"
+query = "check:link"
+field = "avg(tags[link_main_ms,number])"
+period = "5m"
+unit = "ms"
+warn = 150
+crit = 400
+missing = "crit"
+active_when = "check:link active:main"
+
+[[section.metric]]
+label = "BACKUP"
+dataset = "logs"
+query = "check:link"
+field = "avg(tags[link_backup_ms,number])"
+period = "5m"
+unit = "ms"
+warn = 150
+crit = 400
+active_when = "check:link active:backup"
+
+[[section]]
+title = "MY-APP"
+
+[[section.metric]]
+label = "ERRORS"
+dataset = "errors"
+project = "my-app"
+field = "count()"
+period = "1h"
+warn = 5
+crit = 20
+
+[[section.metric]]
+label = "P95"
+dataset = "spans"
+project = "my-app"
+query = "span.op:http.server"
+field = "p95(span.duration)"
+period = "1h"
+unit = "ms"
+warn = 500
+crit = 1500
+
+[[section.metric]]
+label = "LCP"
+dataset = "spans"
+project = "my-app"
+query = "span.op:pageload"
+field = "p75(measurements.lcp)"
+period = "24h"
+unit = "ms"
+warn = 2500
+crit = 4000
+
+[[section.metric]]
+label = "FAIL"
+dataset = "spans"
+project = "my-app"
+query = "span.op:http.server"
+field = "failure_rate()"
+period = "1h"
+unit = "%"
+scale = 100
+warn = 1
+crit = 5
