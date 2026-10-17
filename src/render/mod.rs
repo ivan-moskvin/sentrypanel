@@ -122,6 +122,34 @@ fn row(canvas: &mut Canvas, y: i32, view: &RowView, trusted: bool) {
     );
 }
 
+/// The most digits a value is spelled with: `-9999`, `999.9`, `-999K` — after
+/// that `ms` turns into `s` and a count into `K` or `M`.
+const VALUE_DIGITS: usize = 5;
+
+/// The widest value a metric with this unit is expected to show. `--` and
+/// `ERR` are narrower.
+pub fn widest_value(unit: &str) -> String {
+    format!("{}{unit}", "9".repeat(VALUE_DIGITS))
+}
+
+/// How wide a label may be: what a row leaves once the marker, the gap and the
+/// widest value are taken.
+pub fn label_room(unit: &str) -> i32 {
+    SIZE - MARGIN - LABEL_X - SPACE - width(&widest_value(unit))
+}
+
+pub fn text_px(text: &str) -> i32 {
+    width(text)
+}
+
+/// How many characters fit into so many pixels.
+pub fn chars_in(px: i32) -> i32 {
+    let one = width("W");
+    (px + 1) / (one + 1)
+}
+
+/// A value too wide for what the label leaves turns into `>>` rather than run
+/// over the label: a number cut short would read as another number.
 pub fn fitted(value: &str, room: i32) -> &str {
     if width(value) <= room {
         value
@@ -146,7 +174,6 @@ fn width(text: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::MAX_LABEL;
     use crate::view::SectionView;
 
     fn row_view(label: &str, value: &str, status: Status, active: bool) -> RowView {
@@ -205,13 +232,40 @@ mod tests {
     }
 
     #[test]
-    fn the_longest_label_leaves_room_for_a_long_value() {
-        let label = "W".repeat(MAX_LABEL);
-        let room = SIZE - MARGIN - (LABEL_X + width(&label) + SPACE);
-        for value in ["9999MS", "-9999MS", "999.9K", "100%", "12345678%"] {
-            assert_eq!(fitted(value, room), value, "{value} does not fit");
+    fn the_longest_label_leaves_room_for_the_widest_value() {
+        for unit in ["", "ms", "%", "abc"] {
+            let label = "W".repeat(chars_in(label_room(unit)) as usize);
+            assert!(width(&label) <= label_room(unit), "{unit}");
+            assert!(width(&format!("{label}W")) > label_room(unit), "{unit}");
+
+            let room = SIZE - MARGIN - (LABEL_X + width(&label) + SPACE);
+            for value in [
+                widest_value(unit),
+                "-9999".to_string(),
+                "ERR".into(),
+                "--".into(),
+            ] {
+                assert_eq!(fitted(&value, room), value, "{value} does not fit");
+            }
         }
-        assert_eq!(fitted(&"9".repeat(30), room), OFF_SCALE);
+    }
+
+    #[test]
+    fn a_value_too_wide_gives_way_instead_of_running_over_the_label() {
+        let label = "FRONT LCP";
+        let room = SIZE - MARGIN - (LABEL_X + width(label) + SPACE);
+        assert_eq!(fitted("123456789ms", room), OFF_SCALE);
+        assert!(width(OFF_SCALE) <= room);
+
+        let mut panel = view(Corner::default(), true);
+        panel.sections[0].rows[0] = row_view(label, "123456789ms", Status::Ok, true);
+        assert!(draw(&panel).is_ok());
+    }
+
+    #[test]
+    fn draws_a_space_inside_a_label() {
+        assert!(divoomkit::font::covers("API P95"));
+        assert_eq!(width("API P95"), 7 * 6 - 1);
     }
 
     #[test]

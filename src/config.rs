@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::render::layout;
+use crate::render::{self, layout};
 
 const DEFAULT_REFRESH_SECS: u64 = 60;
 /// Every refresh is one request per group of metrics; anything faster than this
@@ -15,7 +15,6 @@ const DEFAULT_SCREEN: u8 = 1;
 /// Not the port of claudestatus: both may drive screens of the same device.
 const DEFAULT_PORT: u16 = 8478;
 
-pub const MAX_LABEL: usize = 6;
 pub const MAX_TITLE: usize = 12;
 pub const MAX_UNIT: usize = 3;
 
@@ -235,7 +234,7 @@ impl DeviceConfig {
 impl Section {
     fn validate(&self, number: usize, problems: &mut Vec<String>) {
         let at = format!("section {number}");
-        check_text(&at, "title", &self.title, MAX_TITLE, problems);
+        check_text(&at, "title", &self.title, Some(MAX_TITLE), problems);
         if self.metrics.is_empty() {
             problems.push(format!("{at}: has no metrics"));
         }
@@ -247,9 +246,20 @@ impl Section {
 
 impl Metric {
     fn validate(&self, at: &str, problems: &mut Vec<String>) {
-        check_text(at, "label", &self.label, MAX_LABEL, problems);
+        check_text(at, "label", &self.label, None, problems);
         if self.label.trim().is_empty() {
             problems.push(format!("{at}: label is empty"));
+        }
+        let room = render::label_room(&self.unit);
+        let width = render::text_px(&self.label);
+        if width > room {
+            problems.push(format!(
+                "{at}: label {:?} is {width} px wide, and with room for a value like {} \
+                 it may take {room} px ({} characters)",
+                self.label,
+                render::widest_value(&self.unit),
+                render::chars_in(room)
+            ));
         }
         let at = format!("{at} ({})", self.label);
         if self.unit.chars().count() > MAX_UNIT || !divoomkit::font::covers(&self.unit) {
@@ -288,8 +298,10 @@ impl Metric {
     }
 }
 
-fn check_text(at: &str, what: &str, text: &str, max: usize, problems: &mut Vec<String>) {
-    if text.chars().count() > max {
+fn check_text(at: &str, what: &str, text: &str, max: Option<usize>, problems: &mut Vec<String>) {
+    if let Some(max) = max
+        && text.chars().count() > max
+    {
         problems.push(format!(
             "{at}: {what} {text:?} is longer than {max} characters"
         ));
@@ -427,12 +439,28 @@ active_when = "active:a"
     }
 
     #[test]
+    fn takes_a_label_with_a_space_as_long_as_its_value_fits() {
+        let metric = |label: &str, unit: &str| {
+            with_metric(&format!(
+                "\n[[section.metric]]\nlabel = \"{label}\"\ndataset = \"spans\"\nfield = \"p95(span.duration)\"\nunit = \"{unit}\"\n"
+            ))
+        };
+        assert!(metric("API P95", "ms").is_ok());
+        assert!(metric("FRONT LCP", "ms").is_ok());
+        assert!(metric("TWELVE CHARS", "ms").is_ok());
+        assert!(metric("THIRTEEN CHRS", "ms").is_err());
+        assert!(metric("FOURTEEN CHARS", "").is_ok());
+        assert!(metric("FIFTEEN CHARS X", "").is_err());
+    }
+
+    #[test]
     fn refuses_what_the_panel_cannot_draw() {
         let long = with_metric(
-            "\n[[section.metric]]\nlabel = \"TOOLONG\"\ndataset = \"errors\"\nfield = \"count()\"\n",
+            "\n[[section.metric]]\nlabel = \"MUCH TOO LONG A LABEL\"\ndataset = \"errors\"\nfield = \"count()\"\n",
         )
         .unwrap_err();
-        assert!(long.contains("longer than 6"), "{long}");
+        assert!(long.contains("125 px wide"), "{long}");
+        assert!(long.contains("it may take 88 px (14 characters)"), "{long}");
 
         let glyph = with_metric(
             "\n[[section.metric]]\nlabel = \"A_B\"\ndataset = \"errors\"\nfield = \"count()\"\nunit = \"µs\"\n",

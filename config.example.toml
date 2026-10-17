@@ -88,7 +88,7 @@ warn = 5
 crit = 20
 
 [[section.metric]]
-label = "P95"
+label = "API P95"
 dataset = "spans"
 project = "my-app"
 query = "span.op:http.server"
@@ -99,7 +99,7 @@ warn = 500
 crit = 1500
 
 [[section.metric]]
-label = "LCP"
+label = "FRONT LCP"
 dataset = "spans"
 project = "my-app"
 query = "span.op:pageload"
