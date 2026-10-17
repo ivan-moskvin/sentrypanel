@@ -10,6 +10,8 @@ pub struct Query {
     pub period: String,
     pub project: Option<String>,
     pub fields: Vec<String>,
+    /// The newest record of the scope instead of an aggregate over it.
+    pub latest: bool,
 }
 
 impl Query {
@@ -18,6 +20,7 @@ impl Query {
             && self.query == other.query
             && self.period == other.period
             && self.project == other.project
+            && self.latest == other.latest
     }
 
     pub fn url(&self, base_url: &str, org: &str) -> String {
@@ -30,6 +33,9 @@ impl Query {
         }
         params.push(("statsPeriod", &self.period));
         params.push(project_param(self.project.as_deref()));
+        if self.latest {
+            params.push(("sort", "-timestamp"));
+        }
         params.push(("per_page", "1"));
 
         let query: Vec<String> = params
@@ -83,6 +89,7 @@ mod tests {
             period: "5m".into(),
             project: project.map(String::from),
             fields: vec!["avg(tags[ping_ms,number])".into(), "count()".into()],
+            latest: false,
         }
     }
 
@@ -109,6 +116,21 @@ mod tests {
         let by_slug = query(Some("my-app")).url("https://sentry.io", "acme");
         assert!(by_slug.contains("&projectSlug=my-app&"), "{by_slug}");
         assert!(!by_slug.contains("&project="), "{by_slug}");
+    }
+
+    #[test]
+    fn asks_for_the_newest_record_first() {
+        let mut latest = query(None);
+        latest.fields = vec!["timestamp".into()];
+        latest.latest = true;
+        let url = latest.url("https://sentry.io", "acme");
+        assert!(url.contains("&sort=-timestamp&per_page=1"), "{url}");
+        assert!(
+            !query(None)
+                .url("https://sentry.io", "acme")
+                .contains("sort=")
+        );
+        assert!(!latest.same_scope(&query(None)));
     }
 
     #[test]

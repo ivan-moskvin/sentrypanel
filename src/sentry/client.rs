@@ -80,6 +80,7 @@ mod tests {
             period: "1h".into(),
             project: Some("my-app".into()),
             fields: vec!["p95(span.duration)".into()],
+            latest: false,
         }
     }
 

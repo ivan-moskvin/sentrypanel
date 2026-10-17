@@ -62,7 +62,7 @@ unit = "ms"
 warn = 150
 crit = 400
 missing = "crit"
-active_when = "check:link active:main"
+active_when = "active:main"
 
 [[section.metric]]
 label = "BACKUP"
@@ -73,7 +73,7 @@ period = "5m"
 unit = "ms"
 warn = 150
 crit = 400
-active_when = "check:link active:backup"
+active_when = "active:backup"
 
 [[section]]
 title = "MY-APP"

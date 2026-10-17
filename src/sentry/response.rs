@@ -32,6 +32,34 @@ pub fn number(row: &Row, field: &str) -> Result<Option<f64>, String> {
     }
 }
 
+/// When a record was written, as precisely as the answer says.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Moment {
+    Nanos(i128),
+    Text(String),
+}
+
+/// The moment of the newest record in an answer, `None` when there was none.
+/// Both timestamps come from the same API, so text compares as time.
+pub fn moment(row: &Row, precise: &str, timestamp: &str) -> Option<Moment> {
+    let nanos = match row.get(precise) {
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| number.as_u64().map(i128::from)),
+        Some(Value::String(text)) => text.parse().ok(),
+        _ => None,
+    };
+    if let Some(nanos) = nanos {
+        return Some(Moment::Nanos(nanos));
+    }
+    match row.get(timestamp) {
+        Some(Value::String(text)) if !text.is_empty() => Some(Moment::Text(text.clone())),
+        Some(Value::Number(number)) => Some(Moment::Text(number.to_string())),
+        _ => None,
+    }
+}
+
 /// The `detail` Sentry puts into an error answer, or the body itself.
 pub fn detail(body: &str) -> String {
     serde_json::from_str::<Value>(body)
@@ -85,6 +113,28 @@ mod tests {
     fn refuses_what_is_not_an_answer() {
         assert!(first_row("<html>").is_err());
         assert!(first_row(r#"{"meta": {}}"#).is_err());
+    }
+
+    #[test]
+    fn reads_the_moment_of_a_record() {
+        let precise = first_row(
+            r#"{"data": [{"timestamp": "2026-01-01T10:00:00+00:00", "timestamp_precise": 1767261600123456789}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            moment(&precise, "timestamp_precise", "timestamp"),
+            Some(Moment::Nanos(1767261600123456789))
+        );
+
+        let coarse =
+            first_row(r#"{"data": [{"timestamp": "2026-01-01T10:00:00+00:00"}]}"#).unwrap();
+        assert_eq!(
+            moment(&coarse, "timestamp_precise", "timestamp"),
+            Some(Moment::Text("2026-01-01T10:00:00+00:00".into()))
+        );
+
+        let none = first_row(r#"{"data": []}"#).unwrap();
+        assert_eq!(moment(&none, "timestamp_precise", "timestamp"), None);
     }
 
     #[test]
