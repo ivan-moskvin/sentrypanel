@@ -41,11 +41,11 @@ pub fn resolve(sentry: &Sentry, env: Option<String>, home: Option<&Path>) -> Res
             "no Sentry token: set {ENV} or sentry.token_file in the config"
         ));
     };
-    read_file(&expand_home(file, home))
+    read_file(&expand_home(file, home), home)
 }
 
-fn read_file(path: &Path) -> Result<Token, String> {
-    check_private(path)?;
+fn read_file(path: &Path, home: Option<&Path>) -> Result<Token, String> {
+    check_private(path, home)?;
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read the token file {}: {err}", path.display()))?;
     let value = text.trim();
@@ -57,7 +57,8 @@ fn read_file(path: &Path) -> Result<Token, String> {
 
 /// Refused the way ssh refuses a private key others can read: a token anyone on
 /// the machine can copy is a token already leaked.
-fn check_private(path: &Path) -> Result<(), String> {
+#[cfg(unix)]
+fn check_private(path: &Path, _home: Option<&Path>) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
     let metadata = std::fs::metadata(path)
@@ -72,10 +73,44 @@ fn check_private(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Windows has no mode bits to read. What keeps others out there is the
+/// profile: its folders are open to their owner only, so the token has to live
+/// inside it.
+#[cfg(windows)]
+fn check_private(path: &Path, home: Option<&Path>) -> Result<(), String> {
+    std::fs::metadata(path)
+        .map_err(|err| format!("could not read the token file {}: {err}", path.display()))?;
+    match home {
+        Some(home) if !inside(path, home) => Err(format!(
+            "the token file {} is outside your profile {} — keep it there, where others cannot read it",
+            path.display(),
+            home.display()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Both sides are resolved first: Windows spells the same folder by its short
+/// name in one variable and by its long one in another.
+#[cfg(any(windows, test))]
+fn inside(path: &Path, home: &Path) -> bool {
+    resolved(path).starts_with(resolved(home))
+}
+
+/// The real spelling of the part of the path that exists, the rest as written.
+#[cfg(any(windows, test))]
+fn resolved(path: &Path) -> std::path::PathBuf {
+    path.ancestors()
+        .find_map(|known| {
+            let real = std::fs::canonicalize(known).ok()?;
+            Some(real.join(path.strip_prefix(known).ok()?))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     fn sentry(token_file: Option<PathBuf>) -> Sentry {
@@ -94,7 +129,13 @@ mod tests {
 
     fn write(path: &Path, text: &str, mode: u32) {
         std::fs::write(path, text).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
     }
 
     #[test]
@@ -124,6 +165,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn refuses_a_file_others_can_read() {
         let dir = temp_dir("token-open");
@@ -150,6 +192,35 @@ mod tests {
         assert!(missing.contains("absent"), "{missing}");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn knows_a_file_inside_the_profile_from_one_outside() {
+        let home = temp_dir("token-home");
+        let elsewhere = temp_dir("token-elsewhere");
+
+        assert!(inside(&home.join("token"), &home));
+        assert!(inside(&home.join("nested/token"), &home));
+        assert!(!inside(&elsewhere.join("token"), &home));
+
+        std::fs::remove_dir_all(&home).unwrap();
+        std::fs::remove_dir_all(&elsewhere).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refuses_a_file_outside_the_profile() {
+        let home = temp_dir("token-profile");
+        let elsewhere = temp_dir("token-outside");
+        let path = elsewhere.join("token");
+        write(&path, "sntrys_secret", 0o600);
+
+        let err = resolve(&sentry(Some(path)), None, Some(&home)).unwrap_err();
+        assert!(err.contains("outside your profile"), "{err}");
+        assert!(!err.contains("sntrys_secret"), "the token leaked: {err}");
+
+        std::fs::remove_dir_all(&home).unwrap();
+        std::fs::remove_dir_all(&elsewhere).unwrap();
     }
 
     #[test]

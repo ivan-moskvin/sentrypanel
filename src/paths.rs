@@ -6,7 +6,7 @@ use std::path::PathBuf;
 const APP: &str = "sentrypanel";
 
 /// macOS `~/Library/Application Support/sentrypanel`, Linux
-/// `~/.config/sentrypanel`.
+/// `~/.config/sentrypanel`, Windows `%APPDATA%\sentrypanel`.
 pub fn dir() -> Result<PathBuf, String> {
     let base = dirs::config_dir().ok_or("the system has no config directory for this user")?;
     Ok(base.join(APP))
@@ -22,4 +22,16 @@ pub fn file(name: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|err| format!("could not create {}: {err}", dir.display()))?;
     Ok(dir.join(name))
+}
+
+/// Where the panel started at login on Windows writes what it has to say: it
+/// has no console to say it to. Next to the binary the install script puts in
+/// `%LOCALAPPDATA%\sentrypanel`, not in the roaming profile with the config.
+#[cfg(windows)]
+pub fn log_file() -> Result<PathBuf, String> {
+    let base = dirs::data_local_dir().ok_or("the system has no local data directory")?;
+    let dir = base.join(APP);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("could not create {}: {err}", dir.display()))?;
+    Ok(dir.join("sentrypanel.log"))
 }

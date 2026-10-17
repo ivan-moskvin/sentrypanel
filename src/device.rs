@@ -7,18 +7,65 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::DeviceConfig;
 
+/// The device the panel goes to, and the identifier its clock face is kept
+/// under — known even when the device itself came from memory.
+#[derive(Debug)]
+pub struct Located {
+    pub device: Device,
+    pub id: u32,
+    pub remembered: bool,
+}
+
 /// Finds the device the config names. The sweep is paid once per start; it is
 /// what tells the cloud's stale records from devices really on the network, and
 /// it brings the id the clock face is looked up by.
-pub fn locate(config: &DeviceConfig) -> Result<Device, String> {
-    match discover(Discover::new()) {
-        Ok(found) => pick(&found, config),
-        Err(err) => match &config.ip {
-            Some(ip) => Ok(Device::at(
-                ip.parse().map_err(|_| format!("bad device.ip {ip}"))?,
-            )),
-            None => Err(describe(&err)),
-        },
+pub fn locate(config: &DeviceConfig, memory: &Path) -> Result<Located, String> {
+    let located = choose(discover(Discover::new()), config, recall_device(memory))?;
+    if !located.remembered {
+        remember_device(memory, &located.device)?;
+    }
+    Ok(located)
+}
+
+/// A sweep that saw nothing does not mean the device is gone: a process
+/// started at login may find the network not up yet, or barred by the system
+/// from the local network, while the device sits where it was last seen. The
+/// address it was last found at is tried then — but never in place of an
+/// answer the sweep did give.
+pub fn choose(
+    found: divoomkit::Result<Vec<Device>>,
+    config: &DeviceConfig,
+    memory: Option<Known>,
+) -> Result<Located, String> {
+    let fresh = |device: Device| Located {
+        id: device.id(),
+        device,
+        remembered: false,
+    };
+    let err = match found {
+        Ok(found) => return pick(&found, config).map(fresh),
+        Err(err) => err,
+    };
+
+    let from_memory = |known: &Known| -> Option<Located> {
+        Some(Located {
+            device: Device::at(known.ip.parse().ok()?),
+            id: known.id,
+            remembered: true,
+        })
+    };
+    match (&config.ip, &config.name, memory) {
+        (Some(ip), _, Some(known)) if known.ip == *ip => {
+            from_memory(&known).ok_or_else(|| describe(&err))
+        }
+        (Some(ip), _, _) => Ok(fresh(Device::at(
+            ip.parse().map_err(|_| format!("bad device.ip {ip}"))?,
+        ))),
+        (None, Some(name), Some(known)) if known.name.eq_ignore_ascii_case(name) => {
+            from_memory(&known).ok_or_else(|| describe(&err))
+        }
+        (None, None, Some(known)) => from_memory(&known).ok_or_else(|| describe(&err)),
+        _ => Err(describe(&err)),
     }
 }
 
@@ -81,9 +128,9 @@ struct Remembered {
     independence: u32,
 }
 
-pub fn key(device: &Device, screen: u8) -> String {
-    match device.id() {
-        0 => format!("ip:{}/screen:{screen}", device.ip()),
+pub fn key(located: &Located, screen: u8) -> String {
+    match located.id {
+        0 => format!("ip:{}/screen:{screen}", located.device.ip()),
         id => format!("id:{id}/screen:{screen}"),
     }
 }
@@ -104,6 +151,43 @@ pub fn remember(path: &Path, key: &str, face: ClockFace) -> Result<(), String> {
         independence: face.independence,
     };
     let data = serde_json::to_vec_pretty(&remembered).map_err(|err| err.to_string())?;
+    std::fs::write(path, data).map_err(|err| format!("could not write {}: {err}", path.display()))
+}
+
+/// Where the device was last found. Kept beside the config, not in it: the
+/// config is the same file on every machine, while the address belongs to one
+/// network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Known {
+    pub ip: String,
+    #[serde(default)]
+    pub id: u32,
+    #[serde(default)]
+    pub name: String,
+}
+
+pub fn recall_device(path: &Path) -> Option<Known> {
+    let data = std::fs::read(path).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+/// A device seen without its identifier at the address memory holds keeps the
+/// identifier memory has for it: the clock face is filed under it.
+pub fn remember_device(path: &Path, device: &Device) -> Result<(), String> {
+    let ip = device.ip().to_string();
+    let previous = recall_device(path).filter(|known| known.ip == ip);
+    let known = Known {
+        id: match device.id() {
+            0 => previous.as_ref().map_or(0, |known| known.id),
+            id => id,
+        },
+        name: match device.name() {
+            "" => previous.map(|known| known.name).unwrap_or_default(),
+            name => name.to_string(),
+        },
+        ip,
+    };
+    let data = serde_json::to_vec_pretty(&known).map_err(|err| err.to_string())?;
     std::fs::write(path, data).map_err(|err| format!("could not write {}: {err}", path.display()))
 }
 
@@ -163,7 +247,11 @@ mod tests {
     fn remembers_the_clock_face_of_one_screen_of_one_device() {
         let path =
             std::env::temp_dir().join(format!("sentrypanel-face-{}.json", std::process::id()));
-        let device = at("10.0.0.5");
+        let device = Located {
+            device: at("10.0.0.5"),
+            id: 0,
+            remembered: false,
+        };
         let (first, second) = (key(&device, 0), key(&device, 1));
         assert_eq!(first, "ip:10.0.0.5/screen:0");
 
@@ -183,6 +271,91 @@ mod tests {
 
         std::fs::write(&path, "garbage").unwrap();
         assert_eq!(recall(&path, &first), None);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    fn known(ip: &str, id: u32, name: &str) -> Known {
+        Known {
+            ip: ip.into(),
+            id,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn files_the_clock_face_under_the_identifier_when_there_is_one() {
+        let located = Located {
+            device: at("10.0.0.5"),
+            id: 42,
+            remembered: true,
+        };
+        assert_eq!(key(&located, 1), "id:42/screen:1");
+    }
+
+    #[test]
+    fn prefers_what_the_sweep_found_to_what_memory_holds() {
+        let memory = Some(known("10.0.0.9", 7, "Times Gate"));
+        let located = choose(Ok(vec![at("10.0.0.5")]), &config(None, None), memory).unwrap();
+        assert_eq!(located.device.ip().to_string(), "10.0.0.5");
+        assert!(!located.remembered);
+    }
+
+    #[test]
+    fn falls_back_to_the_last_address_when_the_sweep_sees_nothing() {
+        let memory = || Some(known("10.0.0.9", 7, "Times Gate"));
+        let nothing = || Err(divoomkit::Error::NotFound);
+
+        let located = choose(nothing(), &config(None, None), memory()).unwrap();
+        assert_eq!(located.device.ip().to_string(), "10.0.0.9");
+        assert_eq!(located.id, 7);
+        assert!(located.remembered);
+
+        let named = choose(nothing(), &config(None, Some("times gate")), memory()).unwrap();
+        assert_eq!(named.id, 7);
+
+        let err = choose(nothing(), &config(None, Some("Kitchen")), memory()).unwrap_err();
+        assert!(err.contains("no Divoom devices"), "{err}");
+
+        let err = choose(nothing(), &config(None, None), None).unwrap_err();
+        assert!(err.contains("no Divoom devices"), "{err}");
+    }
+
+    #[test]
+    fn keeps_the_identifier_of_a_configured_address_it_has_seen() {
+        let nothing = || Err(divoomkit::Error::NotFound);
+        let memory = || Some(known("10.0.0.9", 7, ""));
+
+        let same = choose(nothing(), &config(Some("10.0.0.9"), None), memory()).unwrap();
+        assert_eq!((same.id, same.remembered), (7, true));
+
+        let other = choose(nothing(), &config(Some("10.0.0.8"), None), memory()).unwrap();
+        assert_eq!(other.device.ip().to_string(), "10.0.0.8");
+        assert_eq!(other.id, 0);
+    }
+
+    #[test]
+    fn remembers_where_the_device_was_found() {
+        let path =
+            std::env::temp_dir().join(format!("sentrypanel-known-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(recall_device(&path), None);
+
+        remember_device(&path, &at("10.0.0.5")).unwrap();
+        assert_eq!(recall_device(&path), Some(known("10.0.0.5", 0, "")));
+
+        std::fs::write(&path, r#"{"ip":"10.0.0.5","id":7,"name":"Times Gate"}"#).unwrap();
+        remember_device(&path, &at("10.0.0.5")).unwrap();
+        assert_eq!(
+            recall_device(&path),
+            Some(known("10.0.0.5", 7, "Times Gate")),
+            "what is known of the same address survives a plain sighting"
+        );
+
+        remember_device(&path, &at("10.0.0.6")).unwrap();
+        assert_eq!(recall_device(&path), Some(known("10.0.0.6", 0, "")));
+
+        std::fs::write(&path, "garbage").unwrap();
+        assert_eq!(recall_device(&path), None);
         std::fs::remove_file(&path).unwrap();
     }
 

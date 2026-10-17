@@ -9,6 +9,8 @@ use crate::sentry::{self, Client, FetchError, Reading};
 use crate::state::State;
 use crate::{daemon, demo, device, render, screen, service, table, token, view};
 
+const EXAMPLE: &str = include_str!("../config.example.toml");
+
 pub fn once(config_path: &Path) -> Result<(), String> {
     let config = Config::load(config_path)?;
     let state = fetched(&config)?;
@@ -44,7 +46,7 @@ pub fn preview(config_path: &Path, file: &Path, demo: bool) -> Result<(), String
 fn demo_state(config_path: &Path) -> Result<(Config, State), String> {
     let config = match config_path.exists() {
         true => Config::load(config_path)?,
-        false => Config::parse(include_str!("../config.example.toml"))?,
+        false => Config::parse(EXAMPLE)?,
     };
     let mut state = State::default();
     state.record(Ok(demo::readings(&config.sections)), chrono::Local::now());
@@ -95,13 +97,52 @@ pub fn screen(config_path: &Path, asked: Option<&str>, lock: &Path) -> Result<()
     println!("The panel moves to screen {number}");
 
     // The running instance holds the old screen; once it has given it back,
-    // the service starts a new one that reads the new number.
-    if daemon::stop(lock) {
-        match service::installed() {
-            true => println!("The service restarts it on the new screen"),
-            false => println!("It was stopped; start it again: sentrypanel run"),
-        }
+    // a new one reads the new number.
+    service::restart(lock, config_path)
+}
+
+pub fn stop(lock: &Path) -> Result<(), String> {
+    match daemon::stop(lock) {
+        true => println!("The panel is stopped and the screen given back"),
+        false => println!("The panel is not running"),
     }
+    if service::installed() && cfg!(unix) {
+        println!("The service starts it again; to keep it off: sentrypanel service uninstall");
+    }
+    Ok(())
+}
+
+/// `config` names the file every command reads; `config init` puts the
+/// example there. An existing config is never overwritten.
+pub fn config(path: &Path, init: bool) -> Result<(), String> {
+    if !init {
+        println!("{}", path.display());
+        if !path.exists() {
+            eprintln!("It is not there yet: sentrypanel config init");
+        }
+        return Ok(());
+    }
+
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .map_err(|err| format!("could not create {}: {err}", dir.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path);
+    let mut file = match file {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(format!("{} already exists — left as it is", path.display()));
+        }
+        Err(err) => return Err(format!("could not write {}: {err}", path.display())),
+    };
+    std::io::Write::write_all(&mut file, EXAMPLE.as_bytes())
+        .map_err(|err| format!("could not write {}: {err}", path.display()))?;
+
+    println!("Created {}", path.display());
+    println!("Set sentry.org and the sections in it, then check it: sentrypanel once");
     Ok(())
 }
 
@@ -110,7 +151,6 @@ mod tests {
     use super::*;
     use crate::config::tests::MINIMAL;
     use crate::testserver::TestServer;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     struct Scratch(PathBuf);
@@ -131,7 +171,11 @@ mod tests {
         fn config(&self, base_url: &str) -> PathBuf {
             let token = self.path("token");
             std::fs::write(&token, "t").unwrap();
-            std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
 
             let text = MINIMAL.replace("https://de.sentry.io/", base_url).replace(
                 "org = \"acme\"",
@@ -211,6 +255,35 @@ mod tests {
 
         assert!(screen(&config, Some("9"), &lock).is_err());
         assert!(screen(&scratch.path("absent.toml"), Some("2"), &lock).is_err());
+    }
+
+    #[test]
+    fn creates_the_config_from_the_example_once() {
+        let scratch = Scratch::new("config-init");
+        let path = scratch.path("nested/config.toml");
+
+        config(&path, false).unwrap();
+        config(&path, true).unwrap();
+        assert!(Config::load(&path).is_ok(), "the example is a valid config");
+
+        std::fs::write(&path, "mine").unwrap();
+        let err = config(&path, true).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
+    }
+
+    #[test]
+    fn the_example_names_nothing_of_one_machine() {
+        let example = Config::parse(EXAMPLE).unwrap();
+        assert_eq!(example.device.ip, None);
+        let token = example.sentry.token_file.unwrap();
+        assert!(token.starts_with("~"), "{}", token.display());
+    }
+
+    #[test]
+    fn stops_nothing_when_nothing_runs() {
+        let scratch = Scratch::new("stop");
+        stop(&scratch.path("absent.pid")).unwrap();
     }
 
     #[test]

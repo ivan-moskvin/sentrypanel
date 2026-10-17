@@ -1,31 +1,136 @@
 //! `service install|uninstall`: `run` as a per-user service — a launchd agent
-//! on macOS, a systemd user unit on Linux.
+//! on macOS, a systemd user unit on Linux, a program started at login on
+//! Windows.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::config::Config;
+use crate::{daemon, device, paths, run};
+
 const LABEL: &str = "io.github.ivan-moskvin.sentrypanel";
 const UNIT: &str = "sentrypanel.service";
 
+/// The per-user list of programs started at login. Task Scheduler would want
+/// administrator rights for a logon trigger; this key does not.
+#[cfg(any(windows, test))]
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(any(windows, test))]
+const RUN_VALUE: &str = "sentrypanel";
+
 pub fn run(action: &str, config: &Path) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|err| format!("could not find ourselves: {err}"))?;
+    if !matches!(action, "install" | "uninstall") {
+        return Err(format!(
+            "unknown service action {action:?}: install or uninstall"
+        ));
+    }
+    let exe = crate::update::self_path()?;
     let home = dirs::home_dir().ok_or("no home directory")?;
     // The service starts in another directory with another environment: a
     // relative path would point somewhere else there.
     let config = std::path::absolute(config).map_err(|err| err.to_string())?;
 
-    match (action, std::env::consts::OS) {
-        ("install", "macos") => install_launchd(&exe, &config, &home),
-        ("uninstall", "macos") => uninstall_launchd(&home),
-        ("install", "linux") => install_systemd(&exe, &config, &home),
-        ("uninstall", "linux") => uninstall_systemd(&home),
-        ("install" | "uninstall", os) => Err(format!("no service support on {os}")),
-        (other, _) => Err(format!(
-            "unknown service action {other:?}: install or uninstall"
-        )),
+    match action {
+        "install" => {
+            prepare(&config)?;
+            install(&exe, &config, &home)
+        }
+        _ => uninstall(&home),
     }
 }
 
+/// A service with a broken config would only restart over and over, so the
+/// config is checked first. The device is looked for here, in the terminal,
+/// and its address remembered: a process the system starts at login may not
+/// see the local network yet.
+fn prepare(config_path: &Path) -> Result<(), String> {
+    let config = Config::load(config_path)?;
+    if config.device.ip.is_some() {
+        return Ok(());
+    }
+    match device::locate(&config.device, &paths::file(run::KNOWN)?) {
+        Ok(located) if !located.remembered => {
+            println!("Found the device at {}", located.device.ip())
+        }
+        Ok(located) => println!(
+            "No device seen on the network now; the panel starts with the address it was last found at, {}",
+            located.device.ip()
+        ),
+        Err(err) => println!("{err}; the panel keeps looking once it runs"),
+    }
+    Ok(())
+}
+
+/// Stops the running panel and has it started again, so that it picks up a
+/// new screen or a new binary.
+pub fn restart(lock: &Path, config: &Path) -> Result<(), String> {
+    if !daemon::stop(lock) {
+        return Ok(());
+    }
+    if !installed() {
+        println!("The panel was stopped; start it again: sentrypanel run");
+        return Ok(());
+    }
+    start_again(config)
+}
+
+/// launchd and systemd bring the service back by themselves.
+#[cfg(unix)]
+fn start_again(_config: &Path) -> Result<(), String> {
+    println!("The service starts the panel again");
+    Ok(())
+}
+
+/// Nothing watches a program started at login, so it is started here.
+#[cfg(windows)]
+fn start_again(config: &Path) -> Result<(), String> {
+    let config = std::path::absolute(config).map_err(|err| err.to_string())?;
+    start_now(&crate::update::self_path()?, &config, &paths::log_file()?)?;
+    println!("The panel is started again");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install(exe: &Path, config: &Path, home: &Path) -> Result<(), String> {
+    install_launchd(exe, config, home)
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall(home: &Path) -> Result<(), String> {
+    uninstall_launchd(home)
+}
+
+#[cfg(target_os = "linux")]
+fn install(exe: &Path, config: &Path, home: &Path) -> Result<(), String> {
+    install_systemd(exe, config, home)
+}
+
+#[cfg(target_os = "linux")]
+fn uninstall(home: &Path) -> Result<(), String> {
+    uninstall_systemd(home)
+}
+
+#[cfg(windows)]
+fn install(exe: &Path, config: &Path, _home: &Path) -> Result<(), String> {
+    install_windows(exe, config)
+}
+
+#[cfg(windows)]
+fn uninstall(_home: &Path) -> Result<(), String> {
+    uninstall_windows()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn install(_exe: &Path, _config: &Path, _home: &Path) -> Result<(), String> {
+    Err(format!("no service support on {}", std::env::consts::OS))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn uninstall(_home: &Path) -> Result<(), String> {
+    Err(format!("no service support on {}", std::env::consts::OS))
+}
+
+#[cfg(unix)]
 pub fn installed() -> bool {
     let Some(home) = dirs::home_dir() else {
         return false;
@@ -33,15 +138,26 @@ pub fn installed() -> bool {
     plist_path(&home).exists() || unit_path(&home).exists()
 }
 
+#[cfg(windows)]
+pub fn installed() -> bool {
+    Command::new("reg")
+        .args(["query", RUN_KEY, "/v", RUN_VALUE])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn plist_path(home: &Path) -> PathBuf {
     home.join("Library/LaunchAgents")
         .join(format!("{LABEL}.plist"))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn unit_path(home: &Path) -> PathBuf {
     home.join(".config/systemd/user").join(UNIT)
 }
 
+#[cfg(target_os = "macos")]
 fn install_launchd(exe: &Path, config: &Path, home: &Path) -> Result<(), String> {
     let path = plist_path(home);
     let log = home.join("Library/Logs/sentrypanel.log");
@@ -62,6 +178,7 @@ fn install_launchd(exe: &Path, config: &Path, home: &Path) -> Result<(), String>
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn uninstall_launchd(home: &Path) -> Result<(), String> {
     let path = plist_path(home);
     let domain = format!("gui/{}", unsafe { libc::getuid() });
@@ -71,6 +188,7 @@ fn uninstall_launchd(home: &Path) -> Result<(), String> {
     remove(&path)
 }
 
+#[cfg(target_os = "linux")]
 fn install_systemd(exe: &Path, config: &Path, home: &Path) -> Result<(), String> {
     let path = unit_path(home);
     write(&path, &unit(exe, config))?;
@@ -83,6 +201,7 @@ fn install_systemd(exe: &Path, config: &Path, home: &Path) -> Result<(), String>
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn uninstall_systemd(home: &Path) -> Result<(), String> {
     let _ = Command::new("systemctl")
         .args(["--user", "disable", "--now", UNIT])
@@ -94,6 +213,88 @@ fn uninstall_systemd(home: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn install_windows(exe: &Path, config: &Path) -> Result<(), String> {
+    let log = paths::log_file()?;
+    let custom = (paths::config()? != config).then_some(config);
+    let line = login_command(exe, custom, &log)?;
+    command(
+        "reg",
+        &[
+            "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &line, "/f",
+        ],
+    )?;
+
+    // The panel already running holds the old binary or the old config.
+    daemon::stop(&paths::file(run::LOCK)?);
+    start_now(exe, config, &log)?;
+
+    println!("Installed: starts at login ({RUN_KEY}\\{RUN_VALUE})");
+    println!("Log: {}", log.display());
+    Ok(())
+}
+
+#[cfg(windows)]
+fn uninstall_windows() -> Result<(), String> {
+    match command("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]) {
+        Ok(()) => println!("Removed {RUN_KEY}\\{RUN_VALUE}"),
+        Err(_) => println!("No service was installed"),
+    }
+    if daemon::stop(&paths::file(run::LOCK)?) {
+        println!("The panel is stopped");
+    }
+    Ok(())
+}
+
+/// The panel is a console program, and Windows opens a window for a console
+/// program started at login. A headless console host gives it a console that
+/// is never shown — and does so before the program runs, so not even a flash
+/// of a window is seen. A program that hid its own window would show it first.
+///
+/// Windows skips an entry of the key longer than 260 characters without a
+/// word, so the default config is not spelled out and a longer line is refused
+/// here.
+#[cfg(any(windows, test))]
+fn login_command(exe: &Path, config: Option<&Path>, log: &Path) -> Result<String, String> {
+    let mut line = format!("conhost.exe --headless \"{}\" run", exe.display());
+    if let Some(config) = config {
+        line.push_str(&format!(" --config \"{}\"", config.display()));
+    }
+    line.push_str(&format!(" --log \"{}\"", log.display()));
+    match line.chars().count() {
+        0..=260 => Ok(line),
+        length => Err(format!(
+            "the command that starts the panel at login is {length} characters long, \
+             and Windows runs none longer than 260 — move the binary or the config to a shorter path"
+        )),
+    }
+}
+
+/// Started from a terminal, the panel needs no console host: it is given a
+/// console of its own that is never shown, and Ctrl+C in the terminal does not
+/// reach it.
+#[cfg(windows)]
+fn start_now(exe: &Path, config: &Path, log: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+
+    Command::new(exe)
+        .arg("run")
+        .arg("--config")
+        .arg(config)
+        .arg("--log")
+        .arg(log)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("could not start the panel: {err}"))
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn plist(exe: &Path, config: &Path, log: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -129,6 +330,7 @@ pub fn plist(exe: &Path, config: &Path, log: &Path) -> String {
     )
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn unit(exe: &Path, config: &Path) -> String {
     format!(
         "[Unit]\n\
@@ -147,6 +349,7 @@ pub fn unit(exe: &Path, config: &Path) -> String {
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn xml(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -154,6 +357,7 @@ fn xml(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn write(path: &Path, text: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
@@ -162,6 +366,7 @@ fn write(path: &Path, text: &str) -> Result<(), String> {
     std::fs::write(path, text).map_err(|err| format!("could not write {}: {err}", path.display()))
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn remove(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => {
@@ -258,6 +463,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn starts_the_panel_at_login_in_a_hidden_console() {
+        let exe = Path::new(r"C:\Users\me\AppData\Local\sentrypanel\sentrypanel.exe");
+        let log = Path::new(r"C:\Users\me\AppData\Local\sentrypanel\sentrypanel.log");
+        assert_eq!(
+            login_command(exe, None, log).unwrap(),
+            r#"conhost.exe --headless "C:\Users\me\AppData\Local\sentrypanel\sentrypanel.exe" run --log "C:\Users\me\AppData\Local\sentrypanel\sentrypanel.log""#
+        );
+
+        let custom = login_command(exe, Some(Path::new(r"D:\panel.toml")), log).unwrap();
+        assert!(
+            custom.contains(r#" run --config "D:\panel.toml" --log "#),
+            "{custom}"
+        );
+
+        let deep = PathBuf::from("D:\\").join("very-long-folder-name".repeat(12));
+        let err = login_command(exe, Some(&deep), log).unwrap_err();
+        assert!(err.contains("260"), "{err}");
+
+        assert!(
+            RUN_KEY.starts_with(r"HKCU\"),
+            "no administrator rights needed"
+        );
+        assert_eq!(RUN_VALUE, "sentrypanel");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn reports_a_failing_command() {
         assert!(command("/bin/sh", &["-c", "exit 0"]).is_ok());
