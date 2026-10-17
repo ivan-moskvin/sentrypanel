@@ -163,6 +163,7 @@ fn platforms(root: &Path) -> Result<Vec<String>, String> {
         .map(|runner| match runner.trim().split('-').next() {
             Some("macos") => "macOS".to_string(),
             Some("ubuntu") => "Linux".to_string(),
+            Some("windows") => "Windows".to_string(),
             Some(other) => other.to_string(),
             None => String::new(),
         })

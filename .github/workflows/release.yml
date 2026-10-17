@@ -1,0 +1,109 @@
+# Builds the binaries on every vX.Y.Z tag and publishes them as a release: both
+# install scripts and the utility itself (sentrypanel update) download from it.
+# The asset names are sentrypanel_<os>_<arch>, spelled the way install.sh reads
+# them from uname, the same scheme as claudestatus.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # `sentrypanel update` pulls a release onto every machine: nothing is
+  # published until it passes what a pull request passes.
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    needs: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is built against musl: a binary linked to the glibc of the
+          # runner refuses to start on an older distribution.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: sentrypanel_linux_amd64
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: sentrypanel_linux_arm64
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            asset: sentrypanel_darwin_amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            asset: sentrypanel_darwin_arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            asset: sentrypanel_windows_amd64.exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            asset: sentrypanel_windows_arm64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build
+        shell: bash
+        env:
+          # The version is baked in here: a build made outside a tag has none
+          # and counts as outdated, so `update` replaces it with a release.
+          SENTRYPANEL_VERSION: ${{ github.ref_name }}
+        run: |
+          set -eu
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target "${{ matrix.target }}"
+          else
+            cargo build --release --locked --target "${{ matrix.target }}"
+          fi
+
+          mkdir -p dist
+          built="target/${{ matrix.target }}/release/sentrypanel"
+          if [ -f "$built.exe" ]; then built="$built.exe"; fi
+          cp "$built" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # The sha256sum format, which is what `sentrypanel update` and the
+      # install scripts read.
+      - name: Checksums
+        run: cd dist && sha256sum * > checksums.txt
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --repo "$GITHUB_REPOSITORY"

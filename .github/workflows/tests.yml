@@ -1,5 +1,6 @@
-# The checks themselves, called from ci.yml. One definition, so the badge and
-# the gate read the same matrix.
+# The checks themselves, called from ci.yml (every push to main and pull
+# request) and from release.yml (every tag). One definition: a release must
+# pass exactly what a pull request passes.
 name: tests
 
 on:
@@ -16,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
