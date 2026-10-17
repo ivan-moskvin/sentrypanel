@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  # The badges in the README are files in the repository: a change that adds
+  # tests has to bring their new count with it.
+  badges:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Regenerate the badges
+        run: cargo run --quiet --example badges
+
+      - name: The test badge is up to date
+        run: |
+          if ! git diff --quiet -- .github/badges/tests.svg; then
+            echo "The test badge does not match the tests. Run: cargo run --example badges" >&2
+            git diff -- .github/badges/tests.svg >&2
+            exit 1
+          fi
