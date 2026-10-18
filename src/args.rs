@@ -13,6 +13,9 @@ Usage:
   sentrypanel screen [N]              show or change the screen, 1–5
   sentrypanel config                  print the path of the config
   sentrypanel config init             create the config from the example
+  sentrypanel config export [FILE]    the config and the token in one file,
+                                      to set up another machine
+  sentrypanel config import FILE      take the config and the token from it
   sentrypanel service install         start the panel at login, now and on
   sentrypanel service uninstall       remove the service
   sentrypanel check                   check whether a new version is out
@@ -41,12 +44,20 @@ pub enum Command {
     Devices,
     Screen(Option<String>),
     Service(String),
-    Config { init: bool },
+    Config(ConfigAction),
     Check,
     Update,
     Uninstall { purge: bool },
     Version,
     Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigAction {
+    Show,
+    Init,
+    Export(Option<PathBuf>),
+    Import(PathBuf),
 }
 
 pub fn parse(args: &[String]) -> Result<Args, String> {
@@ -125,16 +136,7 @@ fn command(words: &[String], demo: bool, purge: bool) -> Result<Command, String>
                 demo,
             });
         }
-        Some("config") => {
-            rest(2)?;
-            return match words.get(1).map(String::as_str) {
-                None => Ok(Command::Config { init: false }),
-                Some("init") => Ok(Command::Config { init: true }),
-                Some(other) => Err(format!(
-                    "unknown config action {other:?}: config or config init"
-                )),
-            };
-        }
+        Some("config") => return config(&words[1..]),
         Some("service") => {
             rest(2)?;
             let action = words.get(1).ok_or("service install or service uninstall")?;
@@ -144,6 +146,28 @@ fn command(words: &[String], demo: bool, purge: bool) -> Result<Command, String>
     };
     rest(1)?;
     Ok(command)
+}
+
+fn config(words: &[String]) -> Result<Command, String> {
+    let file = words.get(1).map(PathBuf::from);
+    let (action, takes) = match words.first().map(String::as_str) {
+        None => (ConfigAction::Show, 0),
+        Some("init") => (ConfigAction::Init, 1),
+        Some("export") => (ConfigAction::Export(file), 2),
+        Some("import") => (
+            ConfigAction::Import(file.ok_or("name the bundle: sentrypanel config import FILE")?),
+            2,
+        ),
+        Some(other) => {
+            return Err(format!(
+                "unknown config action {other:?}: config, config init, config export or config import"
+            ));
+        }
+    };
+    match words.get(takes) {
+        Some(extra) => Err(format!("unexpected argument {extra:?}")),
+        None => Ok(Command::Config(action)),
+    }
 }
 
 #[cfg(test)]
@@ -172,8 +196,23 @@ mod tests {
             command_of("uninstall --purge"),
             Command::Uninstall { purge: true }
         );
-        assert_eq!(command_of("config"), Command::Config { init: false });
-        assert_eq!(command_of("config init"), Command::Config { init: true });
+        assert_eq!(command_of("config"), Command::Config(ConfigAction::Show));
+        assert_eq!(
+            command_of("config init"),
+            Command::Config(ConfigAction::Init)
+        );
+        assert_eq!(
+            command_of("config export"),
+            Command::Config(ConfigAction::Export(None))
+        );
+        assert_eq!(
+            command_of("config export out.toml"),
+            Command::Config(ConfigAction::Export(Some("out.toml".into())))
+        );
+        assert_eq!(
+            command_of("config import in.toml"),
+            Command::Config(ConfigAction::Import("in.toml".into()))
+        );
         assert_eq!(command_of("once"), Command::Once);
         assert_eq!(command_of("devices"), Command::Devices);
         assert_eq!(command_of("version"), Command::Version);
@@ -226,6 +265,9 @@ mod tests {
             "stop --purge",
             "config edit",
             "config init now",
+            "config import",
+            "config import a b",
+            "config export a b",
             "update now",
         ] {
             assert!(parsed(line).is_err(), "{line}");

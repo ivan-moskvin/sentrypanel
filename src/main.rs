@@ -1,6 +1,7 @@
 //! Key Sentry numbers on a screen of a Divoom Times Gate.
 
 mod args;
+mod bundle;
 mod commands;
 mod config;
 mod daemon;
@@ -23,7 +24,7 @@ mod uninstall;
 mod update;
 mod view;
 
-use args::{Command, USAGE};
+use args::{Command, ConfigAction, USAGE};
 
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -76,7 +77,13 @@ fn dispatch(args: args::Args) -> Result<(), String> {
             commands::screen(&config_path, asked.as_deref(), &paths::file(run::LOCK)?)
         }
         Command::Service(action) => service::run(&action, &config_path),
-        Command::Config { init } => commands::config(&config_path, init),
+        Command::Config(ConfigAction::Show) => commands::config(&config_path, false),
+        Command::Config(ConfigAction::Init) => commands::config(&config_path, true),
+        Command::Config(ConfigAction::Export(file)) => commands::export(
+            &config_path,
+            &file.unwrap_or_else(|| bundle::DEFAULT_NAME.into()),
+        ),
+        Command::Config(ConfigAction::Import(file)) => commands::import(&file, &config_path),
         Command::Check => update::check(),
         Command::Update => update::update(&config_path),
         Command::Uninstall { purge } => uninstall::uninstall(&config_path, purge),

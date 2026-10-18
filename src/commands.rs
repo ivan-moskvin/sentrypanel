@@ -7,7 +7,9 @@ use divoomkit::{Discover, discover};
 use crate::config::Config;
 use crate::sentry::{self, Client, FetchError, Reading};
 use crate::state::State;
-use crate::{daemon, demo, device, render, screen, service, table, token, view};
+use crate::{
+    bundle, daemon, demo, device, paths, render, run, screen, service, table, token, view,
+};
 
 const EXAMPLE: &str = include_str!("../config.example.toml");
 
@@ -143,6 +145,40 @@ pub fn config(path: &Path, init: bool) -> Result<(), String> {
 
     println!("Created {}", path.display());
     println!("Set sentry.org and the sections in it, then check it: sentrypanel once");
+    Ok(())
+}
+
+/// The token is read the way the panel reads it, so a bundle carries the one
+/// that works here.
+pub fn export(config_path: &Path, out: &Path) -> Result<(), String> {
+    let config = Config::load(config_path)?;
+    let text = std::fs::read_to_string(config_path)
+        .map_err(|err| format!("could not read {}: {err}", config_path.display()))?;
+    let home = dirs::home_dir();
+    let token = token::resolve(
+        &config.sentry,
+        std::env::var(token::ENV).ok(),
+        home.as_deref(),
+    )?;
+    let known = device::recall_device(&paths::file(run::KNOWN)?);
+
+    bundle::export(&text, &token, known.as_ref(), out)?;
+    println!("Wrote {} — readable by you only", out.display());
+    println!("It holds the Sentry token: carry it over yourself, never by a link,");
+    println!("and delete it once imported. On the other machine:");
+    println!("  sentrypanel config import FILE   or the install script with SENTRYPANEL_BUNDLE");
+    Ok(())
+}
+
+pub fn import(file: &Path, config_path: &Path) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("no home directory")?;
+    let imported = bundle::import(file, config_path, &home)?;
+    if let Some(backup) = &imported.backup {
+        println!("The previous config is kept as {}", backup.display());
+    }
+    println!("Wrote {}", imported.config.display());
+    println!("Wrote the token to {}", imported.token.display());
+    println!("Check it: sentrypanel once; then delete {}", file.display());
     Ok(())
 }
 
