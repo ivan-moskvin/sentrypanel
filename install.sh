@@ -75,7 +75,7 @@ esac
 # The bundle holds the token: once it is in place, the copy is better gone.
 offer_to_delete() {
     answer=y
-    if [ -r /dev/tty ]; then
+    if (exec </dev/tty) 2>/dev/null; then
         printf '==> Delete the bundle %s now? [Y/n] ' "$1"
         read -r answer </dev/tty || answer=y
     fi
