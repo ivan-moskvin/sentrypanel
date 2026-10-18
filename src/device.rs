@@ -71,11 +71,14 @@ pub fn choose(
 
 pub fn pick(found: &[Device], config: &DeviceConfig) -> Result<Device, String> {
     if let Some(ip) = &config.ip {
-        return Ok(found
+        let seen: Vec<(String, &str)> = found
             .iter()
-            .find(|device| device.ip().to_string() == *ip)
-            .cloned()
-            .unwrap_or_else(|| Device::at(ip.parse().expect("validated with the config"))));
+            .map(|device| (device.ip().to_string(), device.name()))
+            .collect();
+        return Ok(match configured(&seen, ip, config.name.as_deref()) {
+            Some(index) => found[index].clone(),
+            None => Device::at(ip.parse().expect("validated with the config")),
+        });
     }
     if let Some(name) = &config.name {
         return found
@@ -92,6 +95,16 @@ pub fn pick(found: &[Device], config: &DeviceConfig) -> Result<Device, String> {
             list(found)
         )),
     }
+}
+
+/// A config carried to another machine keeps the address the device had there;
+/// its name still finds it when the address is not the same here.
+fn configured(seen: &[(String, &str)], ip: &str, name: Option<&str>) -> Option<usize> {
+    seen.iter().position(|(at, _)| at == ip).or_else(|| {
+        let name = name?;
+        seen.iter()
+            .position(|(_, called)| called.eq_ignore_ascii_case(name))
+    })
 }
 
 pub fn list(found: &[Device]) -> String {
@@ -235,6 +248,23 @@ mod tests {
 
         let missed = pick(&found, &config(Some("10.0.0.9"), None)).unwrap();
         assert_eq!(missed.ip().to_string(), "10.0.0.9");
+    }
+
+    #[test]
+    fn finds_the_device_by_its_name_when_the_address_is_of_another_network() {
+        let seen = [
+            ("10.0.0.5".to_string(), "Kitchen"),
+            ("10.0.0.6".to_string(), "Desk"),
+        ];
+
+        assert_eq!(configured(&seen, "192.0.2.9", Some("desk")), Some(1));
+        assert_eq!(
+            configured(&seen, "10.0.0.5", Some("desk")),
+            Some(0),
+            "the address wins"
+        );
+        assert_eq!(configured(&seen, "192.0.2.9", Some("hall")), None);
+        assert_eq!(configured(&seen, "192.0.2.9", None), None);
     }
 
     #[test]
