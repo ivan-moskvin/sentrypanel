@@ -33,6 +33,31 @@ From source, with Rust 1.88 or newer:
 cargo install --git https://github.com/ivan-moskvin/sentrypanel --locked
 ```
 
+## Move to another machine
+
+On the machine that runs the panel, put the config and the token into one file
+(readable by you only):
+
+```bash
+sentrypanel config export ~/Desktop/sentrypanel-bundle
+```
+
+Copy it over yourself, then on Windows (PowerShell):
+
+```powershell
+$env:SENTRYPANEL_BUNDLE = "$HOME\Downloads\sentrypanel-bundle"; irm https://raw.githubusercontent.com/ivan-moskvin/sentrypanel/main/install.ps1 | iex
+```
+
+or on macOS and Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ivan-moskvin/sentrypanel/main/install.sh | SENTRYPANEL_BUNDLE=~/sentrypanel-bundle sh
+```
+
+The script installs the binary, imports the bundle, checks it with `once`,
+starts the service and offers to delete the bundle. On Windows it also offers
+a firewall rule, so the device can fetch the frames.
+
 ## Update and remove
 
 ```
@@ -142,6 +167,8 @@ sentrypanel devices                 list the Divoom devices on the network
 sentrypanel screen [N]              show or change the screen, 1–5
 sentrypanel config                  print the path of the config
 sentrypanel config init             create the config from the example
+sentrypanel config export [FILE]    the config and the token in one file
+sentrypanel config import FILE      take the config and the token from it
 sentrypanel service install         start the panel at login, now and on
 sentrypanel service uninstall       remove the service
 sentrypanel check                   check whether a new version is out
