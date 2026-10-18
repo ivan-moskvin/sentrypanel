@@ -2,8 +2,21 @@
 # after itself: sentrypanel update to update, sentrypanel uninstall to remove.
 #
 #   irm https://raw.githubusercontent.com/ivan-moskvin/sentrypanel/main/install.ps1 | iex
+#
+# With a bundle made by `sentrypanel config export` it also takes the config
+# and the token from it, checks them and starts the panel:
+#
+#   $env:SENTRYPANEL_BUNDLE = "$HOME\Downloads\sentrypanel-bundle"; irm .../install.ps1 | iex
+#   .\install.ps1 -Bundle "$HOME\Downloads\sentrypanel-bundle"
+
+param([string]$Bundle = $env:SENTRYPANEL_BUNDLE)
 
 $ErrorActionPreference = "Stop"
+
+if ($Bundle) {
+    if (-not (Test-Path -LiteralPath $Bundle -PathType Leaf)) { throw "No bundle at $Bundle." }
+    $Bundle = (Resolve-Path -LiteralPath $Bundle).Path
+}
 
 $repo = "ivan-moskvin/sentrypanel"
 $binDir = if ($env:SENTRYPANEL_BIN_DIR) { $env:SENTRYPANEL_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "sentrypanel" }
@@ -12,6 +25,38 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { "amd64" }
     "ARM64" { "arm64" }
     default { throw "Unknown architecture: $($env:PROCESSOR_ARCHITECTURE) — build it from source." }
+}
+
+# The device fetches every frame from the panel over HTTP. Windows Firewall
+# drops that unless the program is let in, and the prompt it would show belongs
+# to a window the panel started at login does not have.
+function Allow-Device([string]$program) {
+    $rule = "sentrypanel"
+    if (Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue) { return }
+    $answer = Read-Host "==> Let the device reach the panel through Windows Firewall? One administrator prompt [Y/n]"
+    if ($answer -match '^(n|no)$') {
+        Write-Host "==> Skipped — the screen stays dark if the firewall drops the device"
+        return
+    }
+    $quoted = $program.Replace("'", "''")
+    $command = "New-NetFirewallRule -DisplayName '$rule' -Direction Inbound -Action Allow -Program '$quoted' -RemoteAddress LocalSubnet -Profile Any | Out-Null"
+    try {
+        Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList "-NoProfile", "-Command", $command
+        Write-Host "==> The firewall lets the device in"
+    } catch {
+        Write-Host "==> The firewall rule was not added: $($_.Exception.Message)"
+    }
+}
+
+# The bundle holds the token: once it is in place, the copy is better gone.
+function Remove-Bundle([string]$path) {
+    $answer = Read-Host "==> Delete the bundle $path now? [Y/n]"
+    if ($answer -match '^(n|no)$') {
+        Write-Host "==> Kept $path — it holds the token, delete it yourself"
+        return
+    }
+    Remove-Item -LiteralPath $path -Force
+    Write-Host "==> Deleted $path"
 }
 
 $asset = "sentrypanel_windows_$arch.exe"
@@ -57,10 +102,23 @@ try {
         $env:Path = "$env:Path;$binDir"
     }
 
-    # A service installed earlier still runs the previous binary: installing it
-    # again restarts it on this one.
-    $run = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "sentrypanel" -ErrorAction SilentlyContinue
-    if ($run) {
+    if ($Bundle) {
+        & $exe config import $Bundle
+        if ($LASTEXITCODE) { throw "The bundle was not imported." }
+
+        Allow-Device $exe
+
+        Write-Host "==> Checking the config and the token"
+        & $exe once
+        if ($LASTEXITCODE) { throw "The check failed — fix the config and run: sentrypanel once; sentrypanel service install" }
+
+        & $exe service install
+        if ($LASTEXITCODE) { throw "The service was not installed." }
+
+        Remove-Bundle $Bundle
+    } elseif (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "sentrypanel" -ErrorAction SilentlyContinue) {
+        # A service installed earlier still runs the previous binary:
+        # installing it again restarts it on this one.
         & $exe service install
     } else {
         $config = & $exe config 2>$null

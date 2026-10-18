@@ -3,10 +3,22 @@
 # after itself: sentrypanel update to update, sentrypanel uninstall to remove.
 #
 #   curl -fsSL https://raw.githubusercontent.com/ivan-moskvin/sentrypanel/main/install.sh | sh
+#
+# With a bundle made by `sentrypanel config export` it also takes the config
+# and the token from it, checks them and starts the panel:
+#
+#   curl -fsSL .../install.sh | SENTRYPANEL_BUNDLE=~/sentrypanel-bundle sh
+#   sh install.sh ~/sentrypanel-bundle
 set -eu
 
 REPO="ivan-moskvin/sentrypanel"
 BIN_DIR="${SENTRYPANEL_BIN_DIR:-$HOME/.local/bin}"
+BUNDLE="${1:-${SENTRYPANEL_BUNDLE:-}}"
+
+if [ -n "$BUNDLE" ] && [ ! -f "$BUNDLE" ]; then
+    printf 'No bundle at %s.\n' "$BUNDLE" >&2
+    exit 1
+fi
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$os" in
@@ -59,6 +71,31 @@ case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *) printf '==> %s is not in PATH — add it to your shell profile:\n    export PATH="%s:$PATH"\n' "$BIN_DIR" "$BIN_DIR" ;;
 esac
+
+# The bundle holds the token: once it is in place, the copy is better gone.
+offer_to_delete() {
+    answer=y
+    if [ -r /dev/tty ]; then
+        printf '==> Delete the bundle %s now? [Y/n] ' "$1"
+        read -r answer </dev/tty || answer=y
+    fi
+    case "$answer" in
+        n|N|no|NO) printf '==> Kept %s — it holds the token, delete it yourself\n' "$1" ;;
+        *) rm -f "$1" && printf '==> Deleted %s\n' "$1" ;;
+    esac
+}
+
+if [ -n "$BUNDLE" ]; then
+    "$BIN_DIR/sentrypanel" config import "$BUNDLE"
+    printf '==> Checking the config and the token\n'
+    if ! "$BIN_DIR/sentrypanel" once; then
+        printf 'The check failed — fix the config and run: sentrypanel once && sentrypanel service install\n' >&2
+        exit 1
+    fi
+    "$BIN_DIR/sentrypanel" service install
+    offer_to_delete "$BUNDLE"
+    exit 0
+fi
 
 # A service installed earlier still runs the previous binary: installing it
 # again restarts it on this one.
